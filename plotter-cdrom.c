@@ -12,28 +12,30 @@
 //http://www.HomoFaciens.de/technics-machines-plotter-cdrom_en_navion.htm
 
 #include <stdio.h>
+#include <stdarg.h>
 #include <termios.h>
 #include <sys/ioctl.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <sys/time.h>
+#include <inttypes.h>
 #include <dirent.h>
 #include <math.h>
 #include <wiringPi.h>
 #include <unistd.h>
+#include <errno.h>
 
-
-#define SERVOUP           10
-#define SERVODOWN         20
+#define SERVOUP     10
+#define SERVODOWN   20
 #define X_STEPPER01 13
 #define X_STEPPER02 14
 
 #define X_STEPPER03 2
 #define X_STEPPER04 3
 
-#define X_ENABLE01 12
-#define X_ENABLE02 0
+#define X_ENABLE01  12
+#define X_ENABLE02  0
 
 #define Y_STEPPER01 6
 #define Y_STEPPER02 10
@@ -44,1165 +46,1189 @@
 //#define Y_ENABLE01 6
 //#define y_ENABLE02 15
 
-#define STEP_MAX_X 220.0
-#define STEP_MAX_Y 220.0
+#define STEP_MAX_X  220.0
+#define STEP_MAX_Y  220.0
 
-#define Z_SERVO 8
+#define Z_SERVO     8
 
-#define BUFFERSIZE         120
+#define BUFFERSIZE  120
 
-int  MaxRows = 24;
-int  MaxCols = 80;
-int  MessageX = 1;
-int  MessageY = 24;
-unsigned char MoveBuffer[BUFFERSIZE];
-
-int StepX = 0; 
-int StepY = 0;
-double StepsPermmX = 250.0 / 35.0;
-double StepsPermmY = 250.0 / 35.0;
-
-char PicturePath[1000];
-
-//+++++++++++++++++++++++ Start gotoxy ++++++++++++++++++++++++++
-//Thanks to 'Stack Overflow', found on http://www.daniweb.com/software-development/c/code/216326
-int gotoxy(int x, int y) {
-  char essq[100]; // String variable to hold the escape sequence
-  char xstr[100]; // Strings to hold the x and y coordinates
-  char ystr[100]; // Escape sequences must be built with characters
-   
-  //Convert the screen coordinates to strings.
-  sprintf(xstr, "%d", x);
-  sprintf(ystr, "%d", y);
-   
-  //Build the escape sequence (vertical move).
-  essq[0] = '\0';
-  strcat(essq, "\033[");
-  strcat(essq, ystr);
-   
-  //Described in man terminfo as vpa=\E[%p1%dd. Vertical position absolute.
-  strcat(essq, "d");
-   
-  //Horizontal move. Horizontal position absolute
-  strcat(essq, "\033[");
-  strcat(essq, xstr);
-  // Described in man terminfo as hpa=\E[%p1%dG
-  strcat(essq, "G");
-   
-  //Execute the escape sequence. This will move the cursor to x, y
-  printf("%s", essq);
-  return 0;
+static const char* geterr() {
+	static char e[64];
+	snprintf(e, sizeof(e), "%s", strerror(errno));
+	return e;
 }
-//------------------------ End gotoxy ----------------------------------
 
-//+++++++++++++++++++++++ Start clrscr ++++++++++++++++++++++++++
-void clrscr(int StartRow, int EndRow) {
-  int i, i2;
-  
-  if (EndRow < StartRow){
-    i = EndRow;
-    EndRow = StartRow;
-    StartRow = i;
-  }
-  gotoxy(1, StartRow);
-  for (i = 0; i <= EndRow - StartRow; i++){
-    for(i2 = 0; i2 < MaxCols; i2++){
-      printf(" ");
-    }
-    printf("\n");
-  }
+static FILE* LOG_FILE;
+
+static void Log_open() {
+	if (! (LOG_FILE = fopen("plotter.log", "wb"))) {
+		printf("Error opening log file\n");
+	}
 }
-//----------------------- End clrscr ----------------------------
 
-//+++++++++++++++++++++++ Start kbhit ++++++++++++++++++++++++++++++++++
-//Thanks to Undertech Blog, http://www.undertec.de/blog/2009/05/kbhit_und_getch_fur_linux.html
-int kbhit(void) {
-
-   struct termios term, oterm;
-   int fd = 0;
-   int c = 0;
-   
-   tcgetattr(fd, &oterm);
-   memcpy(&term, &oterm, sizeof(term));
-   term.c_lflag = term.c_lflag & (!ICANON);
-   term.c_cc[VMIN] = 0;
-   term.c_cc[VTIME] = 1;
-   tcsetattr(fd, TCSANOW, &term);
-   c = getchar();
-   tcsetattr(fd, TCSANOW, &oterm);
-   if (c != -1)
-   ungetc(c, stdin);
-
-   return ((c != -1) ? 1 : 0);
-
+static void Log_close() {
+	if (LOG_FILE) {
+		fclose(LOG_FILE);
+		LOG_FILE = NULL;
+	}
 }
-//------------------------ End kbhit -----------------------------------
 
-//+++++++++++++++++++++++ Start getch ++++++++++++++++++++++++++++++++++
-//Thanks to Undertech Blog, http://www.undertec.de/blog/2009/05/kbhit_und_getch_fur_linux.html
-int getch(){
-   static int ch = -1, fd = 0;
-   struct termios new, old;
+#define l_any(level, fmt, ...) if (LOG_FILE) fprintf(LOG_FILE, level fmt "\n", __VA_ARGS__)
+#define l_info(fmt, ...)  l_any("[INFO]", fmt, __VA_ARGS__)
+#define l_warn(fmt, ...)  l_any("[WARN]", fmt, __VA_ARGS__)
+#define l_error(fmt, ...) l_any("[ERRR]", fmt, __VA_ARGS__)
 
-   fd = fileno(stdin);
-   tcgetattr(fd, &old);
-   new = old;
-   new.c_lflag &= ~(ICANON|ECHO);
-   tcsetattr(fd, TCSANOW, &new);
-   ch = getchar();
-   tcsetattr(fd, TCSANOW, &old);
+typedef enum plotter_mode_t plotter_mode_t;
+enum plotter_mode_t {
+	/// Printing bitmap file
+	PLOTTER_MODE_PRINT = 0,
+	/// Plotting SVG vector graphics file
+	PLOTTER_MODE_PLOT
+};
 
-//   printf("ch=%d ", ch);
+typedef struct Bitmap Bitmap;
+struct Bitmap {
+	unsigned char fileInfo[2];
+	uint32_t fileSize;
+	uint32_t longTemp;
+	uint32_t dataOffset;
+	uint32_t headerSize;
+	int32_t  pictureWidth;
+	int32_t  pictureHeight;
+	uint16_t intTemp;
+	uint16_t colorDepth;
+	uint32_t compressionType;
+	uint32_t pictureSize;
+	uint32_t xPixelPerMeter;
+	uint32_t yPixelPerMeter;
+	uint32_t colorNumber;
+	uint32_t colorUsed;
+};
 
-   return ch;
+static int Bitmap_readHeader2(Bitmap* this, FILE* f) {
+	if (fread(&this->fileInfo, sizeof(this->fileInfo), 1, f) != 1) return -1;
+	if (fread(&this->fileSize, sizeof(this->fileSize), 1, f) != 1) return -1;
+	if (fread(&this->longTemp, sizeof(this->longTemp), 1, f) != 1) return -1;
+	if (fread(&this->dataOffset, sizeof(this->dataOffset), 1, f) != 1) return -1;
+	if (fread(&this->headerSize, sizeof(this->headerSize), 1, f) != 1) return -1;
+	if (fread(&this->pictureWidth, sizeof(this->pictureWidth), 1, f) != 1) return -1;
+	if (fread(&this->pictureHeight, sizeof(this->pictureHeight), 1, f) != 1) return -1;
+	if (fread(&this->intTemp, sizeof(this->intTemp), 1, f) != 1) return -1;
+	if (fread(&this->colorDepth, sizeof(this->colorDepth), 1, f) != 1) return -1;
+	if (fread(&this->compressionType, sizeof(this->compressionType), 1, f) != 1) return -1;
+	if (fread(&this->pictureSize, sizeof(this->pictureSize), 1, f) != 1) return -1;
+	if (fread(&this->xPixelPerMeter, sizeof(this->xPixelPerMeter), 1, f) != 1) return -1;
+	if (fread(&this->yPixelPerMeter, sizeof(this->yPixelPerMeter), 1, f) != 1) return -1;
+	if (fread(&this->colorNumber, sizeof(this->colorNumber), 1, f) != 1) return -1;
+	if (fread(&this->colorUsed, sizeof(this->colorUsed), 1, f) != 1) return -1;
+	return 0;
 }
-//------------------------ End getch -----------------------------------
+
+static int Bitmap_readHeader(Bitmap* this, FILE* f, char* errBuf, size_t errBufSize) {
+	if (Bitmap_readHeader2(this, f) != 0) {
+		snprintf(errBuf, errBufSize, "Error reading bitmap header [%s]", geterr());
+		return -1;
+	}
+	return 0;
+}
+
+static int Bitmap_validateHeader(Bitmap* this, char* errBuf, size_t errBufSize) {
+	if (this->fileInfo[0] != 'B' || this->fileInfo[1] != 'M') {
+		snprintf(errBuf, errBufSize, "Wrong file info: '%c%c' (expected: 'BM')!", this->fileInfo[0], this->fileInfo[1]);
+		return -1;
+	}
+	if (this->pictureWidth != 55 || this->pictureHeight != 55) {
+		snprintf(errBuf, errBufSize, "Wrong picture size: %dx%d (expected 55x55)!", this->pictureWidth, this->pictureHeight);
+		return -1;
+	}
+	if (this->colorDepth != 24) {
+		snprintf(errBuf, errBufSize, "Wrong color depth: %hu (expected be 24)!", this->colorDepth);
+		return -1;
+	}
+	if (this->compressionType != 0) {
+		snprintf(errBuf, errBufSize, "Wrong compression type: %u (expected 0)!", this->compressionType);
+		return -1;
+	}
+	return 0;
+}
+
+static int  MaxRows = 24;
+static int  MaxCols = 80;
+static int  MessageX = 1;
+static int  MessageY = 24;
+
+static int StepX = 0;
+static int StepY = 0;
+static double StepsPermmX = 250.0 / 35.0;
+static double StepsPermmY = 250.0 / 35.0;
+
+static char PicturePath[1000];
+
+/// Executes the escape sequence. This will move the cursor to x, y
+/// Thanks to 'Stack Overflow', found on http://www.daniweb.com/software-development/c/code/216326
+static void gotoxy(int x, int y) {
+	printf("\033[%dd\033[%dG", y, x);
+}
+
+/// Clear terminal window
+static void clrscr(int startRow, int endRow) {
+	int i, j;
+
+	if (endRow < startRow) {
+		i = endRow;
+		endRow = startRow;
+		startRow = i;
+	}
+
+	gotoxy(1, startRow);
+	endRow -= startRow;
+
+	for (i = 0; i <= endRow; i++) {
+		for (j = 0; j < MaxCols; j++) {
+			putchar(' ');
+		}
+		putchar('\n');
+	}
+}
+
+///+++++++++++++++++++++++ Start kbhit ++++++++++++++++++++++++++++++++++
+///Thanks to Undertech Blog, http://www.undertec.de/blog/2009/05/kbhit_und_getch_fur_linux.html
+static int kbhit() {
+	struct termios term, oterm;
+	int fd = 0, c = 0;
+
+	tcgetattr(fd, &oterm);
+	term = oterm;
+
+	term.c_lflag = term.c_lflag & (!ICANON);
+	term.c_cc[VMIN] = 0;
+	term.c_cc[VTIME] = 1;
+	tcsetattr(fd, TCSANOW, &term);
+	c = getchar();
+	tcsetattr(fd, TCSANOW, &oterm);
+
+	if (c != -1) {
+		ungetc(c, stdin);
+	}
+
+	return ((c != -1) ? 1 : 0);
+}
+
+///+++++++++++++++++++++++ Start getch ++++++++++++++++++++++++++++++++++
+///Thanks to Undertech Blog, http://www.undertec.de/blog/2009/05/kbhit_und_getch_fur_linux.html
+static int getch() {
+	struct termios new, old;
+	static int ch, fd;
+
+	fd = fileno(stdin);
+	tcgetattr(fd, &old);
+	new = old;
+	new.c_lflag &= ~(ICANON|ECHO);
+	tcsetattr(fd, TCSANOW, &new);
+	ch = getchar();
+	tcsetattr(fd, TCSANOW, &old);
+
+	return ch;
+}
 
 //++++++++++++++++++++++ Start MessageText +++++++++++++++++++++++++++++
-void MessageText(char *message, int x, int y, int alignment){
-  int i;
-  char TextLine[300];
+static void Msg(int x, int y, int alignment, char *message) {
+	clrscr(y, y);
+	gotoxy(x, y);
 
-  clrscr(y, y);
-  gotoxy (x, y);
-  
-  TextLine[0] = '\0';
-  if(alignment == 1){
-    for(i=0; i < (MaxCols - strlen(message)) / 2 ; i++){
-      strcat(TextLine, " ");
-    }
-  }
-  strcat(TextLine, message);
-  
-  printf("%s\n", TextLine);
+	if (alignment) {
+		int i;
+		y = (MaxCols - strlen(message)) / 2;
+
+		for (i = 0; i < y; i++) {
+			putchar(' ');
+		}
+	}
+	puts(message);
 }
-//-------------------------- End MessageText ---------------------------
 
-//++++++++++++++++++++++ Start PrintRow ++++++++++++++++++++++++++++++++
-void PrintRow(char character, int y){
-  int i;
-  gotoxy (1, y);
-  for(i=0; i<MaxCols;i++){
-    printf("%c", character);
-  }
+static void MsgArg(int x, int y, int alignment, const char *fmt, ...) {
+	static char message[300];
+	va_list va;
+	va_start(va, fmt);
+	vsnprintf(message, sizeof(message), fmt, va);
+	va_end(va);
+	Msg(x, y, alignment, message);
 }
-//-------------------------- End PrintRow ------------------------------
 
-//+++++++++++++++++++++++++ ErrorText +++++++++++++++++++++++++++++
-void ErrorText(char *message){
-  clrscr(MessageY + 2, MessageY + 2);
-  gotoxy (1, MessageY + 2);  
-  printf("Last error: %s", message);
+///++++++++++++++++++++++ Start PrintRow ++++++++++++++++++++++++++++++++
+static void PrintRow(char ch, int y) {
+	int i;
+	gotoxy(1, y);
+	for (i = 0; i < MaxCols; i++) {
+		putchar(ch);
+	}
 }
-//----------------------------- ErrorText ---------------------------
 
-//+++++++++++++++++++++++++ PrintMenue_01 ++++++++++++++++++++++++++++++
-void PrintMenue_01(char * PlotFile, double scale, double width, double height, long MoveLength, int plotterMode){
-  char TextLine[300];
-  
-   clrscr(1, MessageY-2);
-   MessageText("*** Main menu plotter ***", 1, 1, 1);
-   sprintf(TextLine, "M            - toggle move length, current value = %ld step(s)", MoveLength);
-   MessageText(TextLine, 10, 3, 0);
-   MessageText("Cursor right - move plotter in positive X direction", 10, 4, 0);
-   MessageText("Cursor left  - move plotter in negative X direction", 10, 5, 0);
-   MessageText("Cursor up    - move plotter in positive Y direction", 10, 6, 0);
-   MessageText("Cursor down  - move plotter in negative Y direction", 10, 7, 0);
-   MessageText("Page up      - lift pen", 10, 8, 0);
-   MessageText("Page down    - touch down pen", 10, 9, 0);
-   sprintf(TextLine, "F            - choose file. Current file = \"%s\"", PlotFile);
-   MessageText(TextLine, 10, 10, 0);
-   sprintf(TextLine, "               Scale set to = %0.4f. W = %0.2fcm, H = %0.2fcm", scale, width * scale / 10.0 / StepsPermmX, height * scale / 10.0 / StepsPermmX);
-   MessageText(TextLine, 10, 11, 0);
-   MessageText("P            - plot file", 10, 12, 0);
-   if(plotterMode == 0){
-     MessageText("               Operating mode: PRINTING", 10, 13, 0);
-   }
-   if(plotterMode == 1){
-     MessageText("               Operating mode: PLOTTING", 10, 13, 0);
-   }
-
-   MessageText("Esc          - leave program", 10, 16, 0);
-   
+///+++++++++++++++++++++++++ ErrorText +++++++++++++++++++++++++++++
+static void ErrorText(char *message) {
+	int y = MessageY + 2;
+	clrscr(y, y);
+	gotoxy(1, y);
+	printf("Last error: %s", message);
 }
-//------------------------- PrintMenue_01 ------------------------------
 
-//+++++++++++++++++++++++++ PrintMenue_02 ++++++++++++++++++++++++++++++
-char *PrintMenue_02(int StartRow, int selected){
-  char TextLine[300];
-  char FilePattern[5];
-  char OpenDirName[1000];
-  static char FileName[101];
-  DIR *pDIR;
-  struct dirent *pDirEnt;
-  int i = 0;  
-  int Discard = 0;
-  
-  clrscr(1, MessageY-2);
-  MessageText("*** Choose plotter file ***", 1, 1, 1);
-   
-  strcpy(OpenDirName, PicturePath);
-  
-
-  pDIR = opendir(OpenDirName);
-  if ( pDIR == NULL ) {
-    sprintf(TextLine, "Could not open directory '%s'!", OpenDirName);
-    MessageText(TextLine, 1, 4, 1);
-    getch();
-    return( "" );
-  }
-
-  pDirEnt = readdir( pDIR );
-  while ( pDirEnt != NULL && i < 10) {
-    if(strlen(pDirEnt->d_name) > 4){
-      if(memcmp(pDirEnt->d_name + strlen(pDirEnt->d_name)-4, ".svg",4) == 0 || memcmp(pDirEnt->d_name + strlen(pDirEnt->d_name)-4, ".bmp",4) == 0){
-        if(Discard >= StartRow){
-          if(i + StartRow == selected){
-            sprintf(TextLine, ">%s<", pDirEnt->d_name);
-            strcpy(FileName, pDirEnt->d_name);
-          }
-          else{
-            sprintf(TextLine, " %s ", pDirEnt->d_name); 
-          }
-          MessageText(TextLine, 1, 3 + i, 0);
-          i++;
-        }
-        Discard++;
-
-      }
-    }
-    pDirEnt = readdir( pDIR );
-  }  
-
-  gotoxy(MessageX, MessageY + 1);
-  printf("Choose file using up/down keys and confirm with 'Enter' or press 'Esc' to cancel.");
-  
-
-  return (FileName);
+static void ErrorTextArg(const char* fmt, ...) {
+	static char message[300];
+	va_list va;
+	va_start(va, fmt);
+	vsnprintf(message, sizeof(message), fmt, va);
+	va_end(va);
+	ErrorText(message);
 }
-//------------------------- PrintMenue_02 ------------------------------
 
+///+++++++++++++++++++++++++ PrintMenue_01 ++++++++++++++++++++++++++++++
+static void PrintMenue_01(char* PlotFile, double scale, double width, double height, long MoveLength, plotter_mode_t plMode) {
+	double s2 = scale / 10.0 / StepsPermmX;
+	double w  = width  * s2;
+	double h  = height * s2;
 
-//+++++++++++++++++++++++++ PrintMenue_03 ++++++++++++++++++++++++++++++
-void PrintMenue_03(char *FullFileName, long NumberOfLines, long CurrentLine, long CurrentX, long CurrentY, long StartTime){
-  char TextLine[300];
-  long CurrentTime, ProcessHours = 0, ProcessMinutes = 0, ProcessSeconds = 0;
-  
-   CurrentTime = time(0);
-   
-   CurrentTime -= StartTime;
-   
-   while (CurrentTime > 3600){
-     ProcessHours++;
-     CurrentTime -= 3600;
-   }
-   while (CurrentTime > 60){
-     ProcessMinutes++;
-     CurrentTime -= 60;
-   }
-   ProcessSeconds = CurrentTime;
-   
-   clrscr(1, MessageY - 2);
-   MessageText("*** Plotting file ***", 1, 1, 1);
-   
-   sprintf(TextLine, "File name: %s", FullFileName);
-   MessageText(TextLine, 10, 3, 0);
-   sprintf(TextLine, "Number of lines: %ld", NumberOfLines);
-   MessageText(TextLine, 10, 4, 0);
-   sprintf(TextLine, "Current Position(%ld): X = %ld, Y = %ld     ", CurrentLine, CurrentX, CurrentY);
-   MessageText(TextLine, 10, 5, 0);
-   sprintf(TextLine, "Process time: %02ld:%02ld:%02ld", ProcessHours, ProcessMinutes, ProcessSeconds);
-   MessageText(TextLine, 10, 6, 0);
-     
+	clrscr(1, MessageY-2);
+	Msg(1, 1, 1,      "*** Main menu plotter ***");
+	MsgArg(10, 3, 0,  "M            - toggle move length, current value = %ld step(s)", MoveLength);
+	Msg(10, 4, 0,     "Cursor right - move plotter in positive X direction");
+	Msg(10, 5, 0,     "Cursor left  - move plotter in negative X direction");
+	Msg(10, 6, 0,     "Cursor up    - move plotter in positive Y direction");
+	Msg(10, 7, 0,     "Cursor down  - move plotter in negative Y direction");
+	Msg(10, 8, 0,     "Page up      - lift pen");
+	Msg(10, 9, 0,     "Page down    - touch down pen");
+	MsgArg(10, 10, 0, "F            - choose file. Current file = \"%s\"", PlotFile);
+	MsgArg(10, 11, 0, "               Scale set to = %0.4f. W = %0.2fcm, H = %0.2fcm", scale, w, h);
+	Msg(10, 12, 0,    "P            - plot file");
 
+	if (plMode == PLOTTER_MODE_PRINT) {
+		Msg(10, 13, 0, "               Operating mode: PRINTING");
+	}
+	else {
+		if (plMode == PLOTTER_MODE_PLOT) {
+			Msg(10, 13, 0, "               Operating mode: PLOTTING");
+		}
+	}
+
+	Msg(10, 16, 0, "Esc          - leave program");
 }
-//------------------------- PrintMenue_03 ------------------------------
 
+///+++++++++++++++++++++++++ PrintMenue_02 ++++++++++++++++++++++++++++++
+static char* PrintMenue_02(int startRow, int selected) {
+	static char fileName[256];
+	DIR *pDIR;
+	struct dirent *pDirEnt;
+	int i = 0;
+	int discard = 0;
+	char cSel[2];
 
+	clrscr(1, MessageY-2);
+	Msg(1, 1, 1, "*** Choose plotter file ***");
 
-//++++++++++++++++++++++++++++++ MakeStepX ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-void MakeStepX(int direction, long stepPause){
-  StepX += direction;
-  
-  if(StepX > 3){
-    StepX = 0;
-  }
-  if(StepX < 0){
-    StepX = 3;
-  }  
-  
-//You might have to swap the sequence of steps!!!
-//If your motor doesn't rotate as expected, try:
-// StepX == 0   StepX == 1   StepX == 2   StepX == 3
-// 1 0 0 0      0 0 0 1      0 1 0 0      0 0 1 0
-// or:
-// StepX == 0   StepX == 1   StepX == 2   StepX == 3
-// 1 0 0 0      0 0 1 0      0 1 0 0      0 0 0 1
-// or:
-// StepX == 0   StepX == 1   StepX == 2   StepX == 3
-// 1 0 0 0      0 1 0 0      0 0 1 0      0 0 0 1
-// or:
-// StepX == 0   StepX == 1   StepX == 2   StepX == 3
-// 1 0 0 0      0 1 0 0      0 0 0 1      0 0 1 0
+	if (! (pDIR = opendir(PicturePath))) {
+		MsgArg(1, 4, 1, "Could not open directory '%s'!", PicturePath);
+		getch();
+		return "";
+	}
 
-  if(StepX == 0){
-    digitalWrite(X_STEPPER01, 1);
-    digitalWrite(X_STEPPER02, 0);
-    digitalWrite(X_STEPPER03, 0);
-    digitalWrite(X_STEPPER04, 0);    
-  }
-  if(StepX == 1){
-    digitalWrite(X_STEPPER01, 0);
-    digitalWrite(X_STEPPER02, 0);
-    digitalWrite(X_STEPPER03, 1);
-    digitalWrite(X_STEPPER04, 0);    
-  }
-  if(StepX == 2){
-    digitalWrite(X_STEPPER01, 0);
-    digitalWrite(X_STEPPER02, 1);
-    digitalWrite(X_STEPPER03, 0);
-    digitalWrite(X_STEPPER04, 0);    
-  }
-  if(StepX == 3){
-    digitalWrite(X_STEPPER01, 0);
-    digitalWrite(X_STEPPER02, 0);
-    digitalWrite(X_STEPPER03, 0);
-    digitalWrite(X_STEPPER04, 1);    
-  }
-  
-  usleep(stepPause);
+	while ( ((pDirEnt = readdir(pDIR)) != NULL) && (i < 10) ) {
+		if (strlen(pDirEnt->d_name) > 4) {
+			if ((! memcmp(pDirEnt->d_name + strlen(pDirEnt->d_name)-4, ".svg", 4)) ||
+				(! memcmp(pDirEnt->d_name + strlen(pDirEnt->d_name)-4, ".bmp", 4)))
+			{
+				if (discard >= startRow) {
+					if (i + startRow == selected) {
+						cSel[0] = '>';
+						cSel[1] = '<';
+						snprintf(fileName, sizeof(fileName), "%s", pDirEnt->d_name);
+					}
+					else {
+						cSel[0] = cSel[1] = ' ';
+					}
+					MsgArg(1, 3 + i, 0, "%c%s%c", cSel[0], pDirEnt->d_name, cSel[1]);
+					i++;
+				}
+
+				discard++;
+			}
+		}
+	}
+	gotoxy(MessageX, MessageY + 1);
+	printf("Choose file using up/down keys and confirm with 'Enter' or press 'Esc' to cancel.");
+
+	return fileName;
+}
+
+///+++++++++++++++++++++++++ PrintMenue_03 ++++++++++++++++++++++++++++++
+static void PrintMenue_03(char *fullFileName, long numberOfLines, long currentLine, long currentX, long currentY, long startTime) {
+	unsigned char processHours = 0, processMinutes = 0, processSeconds;
+	long currentTime = time(0) - startTime;
+
+	while (currentTime > 3600) {
+		processHours++;
+		currentTime -= 3600;
+	}
+	while (currentTime > 60) {
+		processMinutes++;
+		currentTime -= 60;
+	}
+
+	processSeconds = currentTime;
+
+	clrscr(1, MessageY - 2);
+	Msg(1, 1, 1,     "*** Plotting file ***");
+	MsgArg(10, 3, 0, "File name: %s", fullFileName);
+	MsgArg(10, 4, 0, "Number of lines: %ld", numberOfLines);
+	MsgArg(10, 5, 0, "Current Position(%ld): X = %ld, Y = %ld     ", currentLine, currentX, currentY);
+	MsgArg(10, 6, 0, "Process time: %02u:%02u:%02u", processHours, processMinutes, processSeconds);
+}
+
+///++++++++++++++++++++++++++++++ MakeStepX ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+static void MakeStepX(int direction, long stepPause) {
+	StepX += direction;
+
+	if (StepX > 3) {
+		StepX = 0;
+	}
+	else {
+		if (StepX < 0) {
+			StepX = 3;
+		}
+	}
+
+	// You might have to swap the sequence of steps!!!
+	// If your motor doesn't rotate as expected, try:
+	//  StepX == 0   StepX == 1   StepX == 2   StepX == 3
+	//  1 0 0 0      0 0 0 1      0 1 0 0      0 0 1 0
+	// or:
+	//  StepX == 0   StepX == 1   StepX == 2   StepX == 3
+	//  1 0 0 0      0 0 1 0      0 1 0 0      0 0 0 1
+	// or:
+	//  StepX == 0   StepX == 1   StepX == 2   StepX == 3
+	//  1 0 0 0      0 1 0 0      0 0 1 0      0 0 0 1
+	// or:
+	//  StepX == 0   StepX == 1   StepX == 2   StepX == 3
+	//  1 0 0 0      0 1 0 0      0 0 0 1      0 0 1 0
+
+	switch (StepX) {
+		case 0:
+			digitalWrite(X_STEPPER01, 1);
+			digitalWrite(X_STEPPER02, 0);
+			digitalWrite(X_STEPPER03, 0);
+			digitalWrite(X_STEPPER04, 0);
+			break;
+		case 1:
+			digitalWrite(X_STEPPER01, 0);
+			digitalWrite(X_STEPPER02, 0);
+			digitalWrite(X_STEPPER03, 1);
+			digitalWrite(X_STEPPER04, 0);
+			break;
+		case 2:
+			digitalWrite(X_STEPPER01, 0);
+			digitalWrite(X_STEPPER02, 1);
+			digitalWrite(X_STEPPER03, 0);
+			digitalWrite(X_STEPPER04, 0);
+			break;
+		case 3:
+			digitalWrite(X_STEPPER01, 0);
+			digitalWrite(X_STEPPER02, 0);
+			digitalWrite(X_STEPPER03, 0);
+			digitalWrite(X_STEPPER04, 1);
+			break;
+	}
+
+	usleep(stepPause);
 }
 
 //++++++++++++++++++++++++++++++ MakeStepY ++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-void MakeStepY(int direction, long stepPause){
-  StepY += direction;
-  
-  if(StepY > 3){
-    StepY = 0;
-  }
-  if(StepY < 0){
-    StepY = 3;
-  }  
-  
-//You might have to swap the sequence of steps!!!
-//If your motor doesn't rotate as expected, try:
-// StepY == 0   StepY == 1   StepY == 2   StepY == 3
-// 1 0 0 0      0 0 0 1      0 1 0 0      0 0 1 0
-// or:
-// StepY == 0   StepY == 1   StepY == 2   StepY == 3
-// 1 0 0 0      0 0 1 0      0 1 0 0      0 0 0 1
-// or:
-// StepY == 0   StepY == 1   StepY == 2   StepY == 3
-// 1 0 0 0      0 1 0 0      0 0 1 0      0 0 0 1
-// or:
-// StepY == 0   StepY == 1   StepY == 2   StepY == 3
-// 1 0 0 0      0 1 0 0      0 0 0 1      0 0 1 0
+static void MakeStepY(int direction, long stepPause) {
+	StepY += direction;
 
-  if(StepY == 0){
-    digitalWrite(Y_STEPPER01, 1);
-    digitalWrite(Y_STEPPER02, 0);
-    digitalWrite(Y_STEPPER03, 0);
-    digitalWrite(Y_STEPPER04, 0);    
-  }
-  if(StepY == 1){
-    digitalWrite(Y_STEPPER01, 0);
-    digitalWrite(Y_STEPPER02, 0);
-    digitalWrite(Y_STEPPER03, 1);
-    digitalWrite(Y_STEPPER04, 0);    
-  }
-  if(StepY == 2){
-    digitalWrite(Y_STEPPER01, 0);
-    digitalWrite(Y_STEPPER02, 1);
-    digitalWrite(Y_STEPPER03, 0);
-    digitalWrite(Y_STEPPER04, 0);    
-  }
-  if(StepY == 3){
-    digitalWrite(Y_STEPPER01, 0);
-    digitalWrite(Y_STEPPER02, 0);
-    digitalWrite(Y_STEPPER03, 0);
-    digitalWrite(Y_STEPPER04, 1);    
-  }
-//  printf("StepY\n");
-  usleep(stepPause);
+	if (StepY > 3) {
+		StepY = 0;
+	}
+	else {
+		if (StepY < 0) {
+			StepY = 3;
+		}
+	}
+
+	// You might have to swap the sequence of steps!!!
+	// If your motor doesn't rotate as expected, try:
+	//  StepY == 0   StepY == 1   StepY == 2   StepY == 3
+	//  1 0 0 0      0 0 0 1      0 1 0 0      0 0 1 0
+	// or:
+	//  StepY == 0   StepY == 1   StepY == 2   StepY == 3
+	//  1 0 0 0      0 0 1 0      0 1 0 0      0 0 0 1
+	// or:
+	//  StepY == 0   StepY == 1   StepY == 2   StepY == 3
+	//  1 0 0 0      0 1 0 0      0 0 1 0      0 0 0 1
+	// or:
+	//  StepY == 0   StepY == 1   StepY == 2   StepY == 3
+	//  1 0 0 0      0 1 0 0      0 0 0 1      0 0 1 0
+
+	switch (StepY) {
+		case 0:
+			digitalWrite(Y_STEPPER01, 1);
+			digitalWrite(Y_STEPPER02, 0);
+			digitalWrite(Y_STEPPER03, 0);
+			digitalWrite(Y_STEPPER04, 0);
+			break;
+		case 1:
+			digitalWrite(Y_STEPPER01, 0);
+			digitalWrite(Y_STEPPER02, 0);
+			digitalWrite(Y_STEPPER03, 1);
+			digitalWrite(Y_STEPPER04, 0);
+			break;
+		case 2:
+			digitalWrite(Y_STEPPER01, 0);
+			digitalWrite(Y_STEPPER02, 1);
+			digitalWrite(Y_STEPPER03, 0);
+			digitalWrite(Y_STEPPER04, 0);
+			break;
+		case 3:
+			digitalWrite(Y_STEPPER01, 0);
+			digitalWrite(Y_STEPPER02, 0);
+			digitalWrite(Y_STEPPER03, 0);
+			digitalWrite(Y_STEPPER04, 1);
+			break;
+	}
+
+	usleep(stepPause);
 }
 
+///++++++++++++++++++++++++++++++++++++++ CalculatePlotter ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
+static int CalculatePlotter(long moveX, long moveY, long stepPause) {
+	long tempX = 0, tempY = 0;
+	int  i = 0;
 
-//++++++++++++++++++++++++++++++++++++++ CalculatePlotter ++++++++++++++++++++++++++++++++++++++++++++++++++++++++
-int CalculatePlotter(long moveX, long moveY, long stepPause){
-  char TextLine[1000] = "";
-  long  tempX = 0, tempY = 0;
-  int i = 0;
-  unsigned char reverseX = 0, reverseY = 0;
-  
-  sprintf(TextLine, "Moving X: %ld, Moving Y: %ld", moveX, moveY);
-  MessageText(TextLine, MessageX, MessageY, 0);
-//  getch();
+	MsgArg(MessageX, MessageY, 0, "Moving X: %ld, Moving Y: %ld", moveX, moveY);
 
-  if(moveX == 0){
-    if(moveY > 0){
-      for(i = 0; i < moveY; i++){
-         MakeStepY(-1, stepPause);
-      }
-    }
-    if(moveY < 0){
-      for(i = 0; i < -moveY; i++){
-         MakeStepY(1, stepPause);
-      }
-    }
-  }
-  if(moveY == 0){
-    if(moveX > 0){
-      for(i = 0; i < moveX; i++){
-         MakeStepX(1, stepPause);
-      }
-    }
-    if(moveX < 0){
-      for(i = 0; i < -moveX; i++){
-         MakeStepX(-1, stepPause);
-      }
-    }
-  }
-  if(moveY != 0 && moveX != 0){
-    if(abs(moveX) > abs(moveY)){
-      while(moveY != 0){
-        tempX = moveX / abs(moveY);
-        if(tempX == 0){
-          printf("tempX=%ld, moveX=%ld, moveY=%ld    \n", tempX, moveX, moveY);
-        }
-        if(tempX > 0){
-          for(i = 0; i < tempX; i++){
-             MakeStepX(1, stepPause);
-          }
-        }
-        if(tempX < 0){
-          for(i = 0; i < -tempX; i++){
-             MakeStepX(-1, stepPause);
-          }  
-        }
-        moveX -= tempX;
-        if(moveY > 0){
-          MakeStepY(-1, stepPause);
-          moveY--;
-        }
-        if(moveY < 0){
-          MakeStepY(1, stepPause);
-          moveY++;
-        }
-      }
-      //move remaining X koordinates
-      if(moveX > 0){
-        for(i = 0; i < moveX; i++){
-           MakeStepX(1, stepPause);
-        }
-      }
-      if(moveX < 0){
-        for(i = 0; i < -moveX; i++){
-           MakeStepX(-1, stepPause);
-        }  
-      }
-    }//if(abs(moveX) > abs(moveY))
-    else{
-      while(moveX != 0){
-        tempY = moveY / abs(moveX);
-        if(tempY == 0){
-          printf("tempY=%ld, moveX=%ld, moveY=%ld    \n", tempX, moveX, moveY);
-        }
-        if(tempY > 0){
-          for(i = 0; i < tempY; i++){
-             MakeStepY(-1, stepPause);
-          }
-        }
-        if(tempY < 0){
-          for(i = 0; i < -tempY; i++){
-             MakeStepY(1, stepPause);
-          }  
-        }
-        moveY -= tempY;
-        if(moveX > 0){
-          MakeStepX(1, stepPause);
-          moveX--;
-        }
-        if(moveX < 0){
-          MakeStepX(-1, stepPause);
-          moveX++;
-        }
-      }
-      //move remaining Y koordinates
-      if(moveY > 0){
-        for(i = 0; i < moveY; i++){
-           MakeStepY(-1, stepPause);
-        }
-      }
-      if(moveY < 0){
-        for(i = 0; i < -moveY; i++){
-           MakeStepY(1, stepPause);
-        }  
-      }
-    }
-  }
+	if (moveX == 0) {
+		if (moveY > 0) {
+			for (i = 0; i < moveY; i++) {
+				MakeStepY(-1, stepPause);
+			}
+		}
+		else {
+			if (moveY < 0) {
+				for (i = 0; i < -moveY; i++) {
+					MakeStepY(1, stepPause);
+				}
+			}
+		}
+	}
 
-  return 0; 
+	if (moveY == 0) {
+		if (moveX > 0) {
+			for (i = 0; i < moveX; i++) {
+				MakeStepX(1, stepPause);
+			}
+		}
+		else {
+			if (moveX < 0) {
+				for (i = 0; i < -moveX; i++) {
+					MakeStepX(-1, stepPause);
+				}
+			}
+		}
+	}
+
+	if (moveY != 0 && moveX != 0) {
+		if (abs(moveX) > abs(moveY)) {
+			while (moveY != 0) {
+				tempX = moveX / abs(moveY);
+				if (tempX == 0) {
+					printf("tempX=%ld, moveX=%ld, moveY=%ld    \n", tempX, moveX, moveY);
+				}
+				else {
+					if (tempX > 0) {
+						for (i = 0; i < tempX; i++) {
+							MakeStepX(1, stepPause);
+						}
+					}
+					else { // tempX < 0
+						for (i = 0; i < -tempX; i++) {
+							MakeStepX(-1, stepPause);
+						}
+					}
+				}
+
+				moveX -= tempX;
+				if (moveY > 0) {
+					MakeStepY(-1, stepPause);
+					moveY--;
+				}
+				else {
+					if (moveY < 0) {
+						MakeStepY(1, stepPause);
+						moveY++;
+					}
+				}
+			} // while (moveY != 0)
+
+			// move remaining X coordinates
+			if (moveX > 0) {
+				for (i = 0; i < moveX; i++) {
+					MakeStepX(1, stepPause);
+				}
+			}
+			else {
+				if (moveX < 0) {
+					for (i = 0; i < -moveX; i++) {
+						MakeStepX(-1, stepPause);
+					}
+				}
+			}
+		}
+		else { // abs(moveX) <= abs(moveY)
+			while (moveX != 0) {
+				tempY = moveY / abs(moveX);
+				if (tempY == 0) {
+					printf("tempY=%ld, moveX=%ld, moveY=%ld    \n", tempX, moveX, moveY);
+				}
+				else {
+					if (tempY > 0) {
+						for (i = 0; i < tempY; i++) {
+							MakeStepY(-1, stepPause);
+						}
+					}
+					else { // tempY < 0
+						for (i = 0; i < -tempY; i++) {
+							MakeStepY(1, stepPause);
+						}
+					}
+				}
+
+				moveY -= tempY;
+				if (moveX > 0) {
+					MakeStepX(1, stepPause);
+					moveX--;
+				}
+				else {
+					if (moveX < 0) {
+						MakeStepX(-1, stepPause);
+						moveX++;
+					}
+				}
+			}
+
+			// move remaining Y coordinates
+			if (moveY > 0) {
+				for (i = 0; i < moveY; i++) {
+					MakeStepY(-1, stepPause);
+				}
+			}
+			else {
+				if (moveY < 0) {
+					for (i = 0; i < -moveY; i++) {
+						MakeStepY(1, stepPause);
+					}
+				}
+			}
+		}
+	}
+
+	return 0;
 }
-//-------------------------------------- CalculatePlotter --------------------------------------------------------
 
 //######################################################################
 //################## Main ##############################################
 //######################################################################
 
-int main(int argc, char **argv){
+static unsigned char currentPlotDown = 0;
 
-  int MenueLevel = 0;
-  int KeyHit = 0;
-  int KeyCode[5];
-  char FileInfo[3];
-  char FileName[200] = "";
-  char FullFileName[200] = "";
-  char FileNameOld[200] = "";
-  struct winsize terminal;
-  double Scale = 1.0;
-  double OldScale = 1.0;
-  double PicWidth = 0.0;
-  double PicHeight = 0.0;
-  long MoveLength = 1;
-  long OldMoveLength = 200;
-  int plotterMode = 0;
-  int i;
-  int SingleKey=0;
-  long stepPause = 10000;
-  long currentPlotX = 0, currentPlotY = 0, currentPlotDown = 0;
-  int FileSelected = 0;
-  int FileStartRow = 0;
-  char *pEnd;
-  FILE *PlotFile;
-  char TextLine[300];
-  long xMin = 1000000, xMax = -1000000;
-  long yMin = 1000000, yMax = -1000000;
-  long coordinateCount = 0;
-  char a;
-  int ReadState = 0;
-  long xNow = 0, yNow = 0;
-  long xNow1 = 0, yNow1 = 0;
-  long xNow2 = 0, yNow2 = 0;
-  long FileSize;
-  long LongTemp;
-  long DataOffset;
-  long HeaderSize;
-  long PictureWidth;
-  long PictureHeight;
-  int  IntTemp;
-  int  ColorDepth;
-  long CompressionType;
-  long PictureSize;
-  long XPixelPerMeter;
-  long YPixelPerMeter;
-  long ColorNumber;
-  long ColorUsed;
-  long StepsPerPixelX = (double)(STEP_MAX_X) / 55.0, StepsPerPixelY = (double)STEP_MAX_Y / 55.0;
-  long FillBytes = 0;
-  struct timeval StartTime, EndTime;
-  long coordinatePlot = 0;
-  int stopPlot = 0;
-  long JetOffset1 = 40, JetOffset2 = 40;
-  int ReverseMode, NewLine;
-  long CyanDrops, MagentaDrops, YellowDrops;
-  int PixelRed, PixelGreen, PixelBlue;
-  int PixelRedNext, PixelGreenNext, PixelBlueNext;
-  long PlotStartTime = 0;
+#define PEN_FORCE_UP()					\
+{										\
+	softPwmWrite(Z_SERVO, SERVOUP);		\
+	usleep(500000);						\
+	softPwmWrite(Z_SERVO, 0);			\
+	currentPlotDown = 0;				\
+}
 
+#define PEN_FORCE_DOWN()				\
+{										\
+	softPwmWrite(Z_SERVO, SERVODOWN);	\
+	usleep(500000);						\
+	softPwmWrite(Z_SERVO, 0);			\
+	currentPlotDown = 1;				\
+}
 
-  FileInfo[2]='\0';
+#define PEN_UP()							\
+	if (currentPlotDown) PEN_FORCE_UP()
 
-  strcpy(FileName, "noFiLE");
+#define PEN_DOWN()							\
+	if (! currentPlotDown) PEN_FORCE_DOWN()
 
-  getcwd(PicturePath, 1000);
-  strcat(PicturePath, "/pictures");
-  printf("PicturePath=>%s<", PicturePath);
+static void gpioInitOrExit() {
+	if (wiringPiSetup() == -1) {
+		printf("Could not run wiringPiSetup! [%s]\n", geterr());
+		exit(1);
+	}
 
-  if (wiringPiSetup () == -1){
-    printf("Could not run wiringPiSetup!");
-    exit(1);
-  }
+	softPwmCreate(Z_SERVO, SERVOUP, 200);
+	PEN_FORCE_UP();
 
-  softPwmCreate(Z_SERVO, SERVOUP, 200);
-  softPwmWrite(Z_SERVO, SERVOUP);
-  usleep(500000);
-  softPwmWrite(Z_SERVO, 0);
+	pinMode(X_STEPPER01, OUTPUT);
+	pinMode(X_STEPPER02, OUTPUT);
+	pinMode(X_STEPPER03, OUTPUT);
+	pinMode(X_STEPPER04, OUTPUT);
+	pinMode(X_ENABLE01, OUTPUT);
+	pinMode(X_ENABLE02, OUTPUT);
 
+	digitalWrite(X_STEPPER01, 1);
+	digitalWrite(X_STEPPER02, 0);
+	digitalWrite(X_STEPPER03, 0);
+	digitalWrite(X_STEPPER04, 0);
 
-  pinMode (X_STEPPER01, OUTPUT);
-  pinMode (X_STEPPER02, OUTPUT);
-  pinMode (X_STEPPER03, OUTPUT);
-  pinMode (X_STEPPER04, OUTPUT);
-  pinMode (X_ENABLE01, OUTPUT);
-  pinMode (X_ENABLE02, OUTPUT);
+	digitalWrite(X_ENABLE01, 1);
+	digitalWrite(X_ENABLE02, 1);
 
-  digitalWrite(X_STEPPER01, 1);
-  digitalWrite(X_STEPPER02, 0);    
-  digitalWrite(X_STEPPER03, 0);    
-  digitalWrite(X_STEPPER04, 0);    
+	pinMode(Y_STEPPER01, OUTPUT);
+	pinMode(Y_STEPPER02, OUTPUT);
+	pinMode(Y_STEPPER03, OUTPUT);
+	pinMode(Y_STEPPER04, OUTPUT);
+	digitalWrite(Y_STEPPER01, 1);
+	digitalWrite(Y_STEPPER02, 0);
+	digitalWrite(Y_STEPPER03, 0);
+	digitalWrite(Y_STEPPER04, 0);
+}
 
-  digitalWrite(X_ENABLE01, 1);
-  digitalWrite(X_ENABLE02, 1);    
+static void gpioCleanupAndExit() {
+	digitalWrite(X_STEPPER01, 0);
+	digitalWrite(X_STEPPER02, 0);
+	digitalWrite(X_STEPPER03, 0);
+	digitalWrite(X_STEPPER04, 0);
+	digitalWrite(X_ENABLE01, 0);
+	digitalWrite(X_ENABLE02, 0);
 
-  pinMode (Y_STEPPER01, OUTPUT);
-  pinMode (Y_STEPPER02, OUTPUT);
-  pinMode (Y_STEPPER03, OUTPUT);
-  pinMode (Y_STEPPER04, OUTPUT);
-  digitalWrite(Y_STEPPER01, 1);
-  digitalWrite(Y_STEPPER02, 0);    
-  digitalWrite(Y_STEPPER03, 0);    
-  digitalWrite(Y_STEPPER04, 0);    
+	digitalWrite(Y_STEPPER01, 0);
+	digitalWrite(Y_STEPPER02, 0);
+	digitalWrite(Y_STEPPER03, 0);
+	digitalWrite(Y_STEPPER04, 0);
+	exit(0);
+}
 
+static void exiting() {
+	Log_close();
+}
 
-  if(ioctl(STDOUT_FILENO, TIOCGWINSZ, &terminal)<0){
-    printf("Can't get size of terminal window");
-  }
-  else{
-    MaxRows = terminal.ws_row;
-    MaxCols = terminal.ws_col;
-    MessageY = MaxRows-3;
-  }
+int main(int argc, char **argv) {
+	Bitmap bmp;
+	int menuLevel = 0;
+	int keyHit = 0;
+	int keyCode[5];
+	char fileName[200] = "";
+	char fullFileName[200] = "";
+	char fileNameOld[200] = "";
+	struct winsize terminal;
+	double scale = 1.0;
+	long moveLength = 1;
+	plotter_mode_t plMode = PLOTTER_MODE_PRINT;
+	int i;
+	unsigned char singleKey=0;
+	long stepPause = 10000;
+	long currentPlotX = 0, currentPlotY = 0;
+	int fileSelected = 0;
+	int fileStartRow = 0;
+	char *pEnd;
+	FILE *plotFile;
+	char textLine[300];
+	long xMin = 1000000, xMax = -1000000;
+	long yMin = 1000000, yMax = -1000000;
+	long coordinateCount = 0;
+	char a;
+	int rdState = 0;
+	long xNow = 0, yNow = 0;
+	long xNow1 = 0, yNow1 = 0;
+	long xNow2 = 0, yNow2 = 0;
+	long stepsPerPixelX = (double)(STEP_MAX_X) / 55.0, StepsPerPixelY = (double)STEP_MAX_Y / 55.0;
+	long fillBytes = 0;
+	long coordinatePlot = 0;
+	int stopPlot = 0;
+	int reverseMode, newLine;
+	unsigned char bgr[3], bgrNext[3];
+	long plotStartTime = 0;
 
-  clrscr(1, MaxRows);
-  PrintRow('-', MessageY - 1);
-  PrintMenue_01(FileName, Scale, xMax - xMin, yMax - yMin, MoveLength, plotterMode);
+	atexit(exiting);
+	Log_open();
 
+	strcpy(fileName, "noFiLE");
 
-  while (1){
-    MessageText("Waiting for key press.", MessageX, MessageY, 0);
+	if (argc > 1) {
+		if (! (strcmp(argv[1], "--help"))) {
+			printf("Usage:\n\
+	%s [PICTURES_PATH]\n\n\
+	Where PICTURES_PATH is optional argument with path to directory \n\
+	containing SVG and/or BMP files. Default is: ./pictures\n", argv[0]);
+			exit(0);
+		}
+		snprintf(PicturePath, sizeof(PicturePath), "%s", argv[1]);
+	}
+	else {
+		getcwd(PicturePath, 1000);
+		strcat(PicturePath, "/pictures");
+	}
 
-    i = 0;
-    SingleKey = 1;
-    KeyCode[0] = 0;
-    KeyCode[1] = 0;
-    KeyCode[2] = 0;
-    KeyCode[3] = 0;
-    KeyCode[4] = 0;
-    KeyHit = 0;
-    while (kbhit()){
-      KeyHit = getch();
-      KeyCode[i] = KeyHit;
-      i++;
-      if(i == 5){
-        i = 0;
-      }
-      if(i > 1){
-        SingleKey = 0;
-      }
-    }
-    if(SingleKey == 0){
-      KeyHit = 0;
-    }
+	printf("PicturePath=>%s<", PicturePath);
+	l_info("Picture path: '%s'", PicturePath);
 
-    if(MenueLevel == 0){
-    
-      //Move X-axis
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 68 && KeyCode[3] == 0 && KeyCode[4] == 0){
-        CalculatePlotter(-MoveLength, 0, stepPause);
-      }
+	if (ioctl(STDOUT_FILENO, TIOCGWINSZ, &terminal) < 0) {
+		printf("Can't get size of terminal window [%s]\n", geterr());
+		exit(1);
+	}
+	else {
+		MaxRows = terminal.ws_row;
+		MaxCols = terminal.ws_col;
+		MessageY = MaxRows-3;
+	}
 
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 67 && KeyCode[3] == 0 && KeyCode[4] == 0){
-        CalculatePlotter(MoveLength, 0, stepPause);
-      }
+	l_info("Terminal size rows x cols: %d x %d", MaxRows, MaxCols);
 
-      //Move Y-axis
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 65 && KeyCode[3] == 0 && KeyCode[4] == 0){
-        CalculatePlotter(0, MoveLength, stepPause);
-      }
+	gpioInitOrExit();
 
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 66 && KeyCode[3] == 0 && KeyCode[4] == 0){
-        CalculatePlotter(0, -MoveLength, stepPause);
-      }
+	clrscr(1, MaxRows);
+	PrintRow('-', MessageY - 1);
+	PrintMenue_01(fileName, scale, xMax - xMin, yMax - yMin, moveLength, plMode);
 
-      //Pen UP/DOWN
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 53 && KeyCode[3] == 126 && KeyCode[4] == 0){
-        softPwmWrite(Z_SERVO, SERVOUP);
-        usleep(500000);
-        softPwmWrite(Z_SERVO, 0);
-        currentPlotDown = 1;
-      }
+	while (1) {
+		Msg(MessageX, MessageY, 0, "Waiting for key press...");
 
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 54 && KeyCode[3] == 126 && KeyCode[4] == 0){
-        softPwmWrite(Z_SERVO, SERVODOWN);
-        usleep(500000);
-        softPwmWrite(Z_SERVO, 0);
-        currentPlotDown = 1;
-      }
+		i = 0;
+		singleKey = 1;
+		memset(keyCode, 0, sizeof(keyCode));
+		keyHit = 0;
 
+		while (kbhit()) {
+			keyHit = getch();
+			keyCode[i++] = keyHit;
+			if (i == 5) {
+				i = 0;
+			}
+			else {
+				if (i > 1) {
+					singleKey = 0;
+				}
+			}
+		}
 
-      if(KeyHit == 'm'){
-        if(MoveLength == 1){
-          MoveLength = 10;
-        }
-        else{
-          MoveLength = 1;
-        }
-        PrintMenue_01(FileName, Scale, xMax - xMin, yMax - yMin, MoveLength, plotterMode);
-      }
+		if (! singleKey) {
+			keyHit = 0;
+		}
 
-      if(KeyHit == 'f'){
-        FileStartRow = 0;
-        FileSelected = 0;
-        strcpy(FileNameOld, FileName);
-        strcpy(FileName, PrintMenue_02(FileStartRow, 0));
-        MenueLevel = 1;
-      }
+		if (menuLevel == 0) {
 
+			// Move X-axis
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 68 && keyCode[3] == 0 && keyCode[4] == 0) {
+				CalculatePlotter(-moveLength, 0, stepPause);
+			}
 
-      if(KeyHit == 'p'){//Plot file
-        MessageText("3 seconds until plotting starts !!!!!!!!!!!!!!!!!", 1, 20, 0);
-        sleep(3);
-        if(strcmp(FileName, "noFiLE") != 0){
-          if((PlotFile=fopen(FullFileName,"rb"))==NULL){
-            sprintf(TextLine, "Can't open file '%s'!\n", FullFileName);
-            strcpy(FileName, "NoFiLE");
-            ErrorText(TextLine);
-          }
-        }
-        if(strcmp(FileName, "noFiLE") != 0){
-          if(plotterMode == 1){//Plot file
-            xNow1 = -1;
-            xNow2 = -1;
-            yNow1 = -1;
-            yNow2 = -1;
-            currentPlotX = 0;
-            currentPlotY = 0;        
-            PlotStartTime = time(0);
-            PrintMenue_03(FullFileName, coordinateCount, 0, 0, 0, PlotStartTime);
-            coordinatePlot = 0;
-            stopPlot = 0;
-            if(currentPlotDown == 1){
-              softPwmWrite(Z_SERVO, SERVOUP);
-              currentPlotDown = 0;
-              usleep(500000);
-              softPwmWrite(Z_SERVO, 0);
-            }
-            
-            while(!(feof(PlotFile)) && stopPlot == 0){
-              
-              fread(&a, 1, 1, PlotFile);
-              i=0;
-              TextLine[0] = '\0';
-              while(a !=' ' && a != '<' && a != '>' && a != '\"' && a != '=' && a != ',' && a != ':'){
-                TextLine[i] = a;
-                TextLine[i+1] = '\0';
-                i++;
-                fread(&a, 1, 1, PlotFile);
-              }
-              if(a == '<'){//Init
-                if(xNow2 > -1 && yNow2 > -1 && (xNow2 != xNow1 || yNow2 != yNow1)){
-                  stopPlot = CalculatePlotter(xNow2 - currentPlotX, yNow2 - currentPlotY, stepPause);
-                  if(currentPlotDown == 0){
-                    softPwmWrite(Z_SERVO, SERVODOWN);
-                    usleep(500000);
-                    softPwmWrite(Z_SERVO, 0);
-                    currentPlotDown = 1;
-                  }
-                  currentPlotX = xNow2;
-                  currentPlotY = yNow2;
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 67 && keyCode[3] == 0 && keyCode[4] == 0) {
+				CalculatePlotter(moveLength, 0, stepPause);
+			}
 
-                  stopPlot = CalculatePlotter(xNow1 - currentPlotX, yNow1 - currentPlotY, stepPause);
-                  currentPlotX = xNow1;
-                  currentPlotY = yNow1;
- 
-                  stopPlot = CalculatePlotter(xNow - currentPlotX, yNow - currentPlotY, stepPause);
-                  currentPlotX = xNow;
-                  currentPlotY = yNow;
-                }
-                ReadState = 0;
-                xNow1 = -1;
-                xNow2 = -1;
-                yNow1 = -1;
-                yNow2 = -1;
-              }
-              if(strcmp(TextLine, "path") == 0){
-                if(currentPlotDown == 1){
-                  softPwmWrite(Z_SERVO, SERVOUP);
-                  usleep(500000);
-                  softPwmWrite(Z_SERVO, 0);
-                  currentPlotDown = 0;
-                }
-                ReadState = 1;//path found
-              }
-              if(ReadState == 1 && strcmp(TextLine, "fill") == 0){
-                ReadState = 2;//fill found
-              }
-              if(ReadState == 2 && strcmp(TextLine, "none") == 0){
-                ReadState = 3;//none found
-              }
-              if(ReadState == 2 && strcmp(TextLine, "stroke") == 0){
-                ReadState = 0;//stroke found, fill isn't "none"
-              }
-              if(ReadState == 3 && strcmp(TextLine, "d") == 0 && a == '='){
-                ReadState = 4;//d= found
-              }
-              if(ReadState == 4 && strcmp(TextLine, "M") == 0 && a == ' '){
-                ReadState = 5;//M found
-              }
+			// Move Y-axis
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 65 && keyCode[3] == 0 && keyCode[4] == 0) {
+				CalculatePlotter(0, moveLength, stepPause);
+			}
 
-              if(ReadState == 6){//Y value
-                yNow = (strtol(TextLine, &pEnd, 10) - yMin) * Scale * StepsPermmY / StepsPermmX;
-                ReadState = 7;
-              }
-              if(ReadState == 5 && a == ','){//X value
-                xNow = ((xMax - strtol(TextLine, &pEnd, 10))) * Scale;
-                ReadState = 6;
-              }
-              if(ReadState == 7){
-                if(xNow2 > -1 && yNow2 > -1 && (xNow2 != xNow1 || yNow2 != yNow1)){
-                  stopPlot = CalculatePlotter(xNow2 - currentPlotX, yNow2 - currentPlotY, stepPause);
-                  if(currentPlotDown == 0){
-                    softPwmWrite(Z_SERVO, SERVODOWN);
-                    usleep(500000);
-                    softPwmWrite(Z_SERVO, 0);
-                    currentPlotDown = 1;
-                  }
-                  currentPlotX = xNow2;
-                  currentPlotY = yNow2;
-                }
-                xNow2 = xNow1;
-                yNow2 = yNow1;
-                xNow1 = xNow;
-                yNow1 = yNow;
-                ReadState = 5;
-              }
-            }//while(!(feof(PlotFile)) && stopPlot == 0){
-            fclose(PlotFile);
-            if(currentPlotDown == 1){
-              softPwmWrite(Z_SERVO, SERVOUP);
-              usleep(500000);
-              softPwmWrite(Z_SERVO, 0);
-              currentPlotDown = 0;
-            }
-            PrintMenue_03(FullFileName, coordinateCount, coordinatePlot, 0, 0, PlotStartTime);
-            CalculatePlotter( -currentPlotX, -currentPlotY, stepPause );
-            currentPlotX = 0;
-            currentPlotY = 0;
-            while(kbhit()){
-              getch();
-            }
-            MessageText("Finished! Press any key to return to main menu.", MessageX, MessageY, 0);
-            getch();
-            PrintMenue_01(FileName, Scale, xMax - xMin, yMax - yMin, MoveLength, plotterMode);
-          }//if(plotterMode == 1){
-            
-            
-          if(plotterMode == 0){//bitmap
-            fread(&FileInfo, 2, 1, PlotFile);
-            fread(&FileSize, 4, 1, PlotFile);
-            fread(&LongTemp, 4, 1, PlotFile);
-            fread(&DataOffset, 4, 1, PlotFile);
-            fread(&HeaderSize, 4, 1, PlotFile);
-            fread(&PictureWidth, 4, 1, PlotFile);
-            fread(&PictureHeight, 4, 1, PlotFile);
-            fread(&IntTemp, 2, 1, PlotFile);
-            fread(&ColorDepth, 2, 1, PlotFile);
-            fread(&CompressionType, 4, 1, PlotFile);
-            fread(&PictureSize, 4, 1, PlotFile);
-            fread(&XPixelPerMeter, 4, 1, PlotFile);
-            fread(&YPixelPerMeter, 4, 1, PlotFile);
-            fread(&ColorNumber, 4, 1, PlotFile);
-            fread(&ColorUsed, 4, 1, PlotFile);
-            
-            FillBytes = 0;
-            while((PictureWidth * 3 + FillBytes) % 4 != 0){
-              FillBytes++;
-            }
-            CalculatePlotter( 0, StepsPerPixelX * PictureWidth, stepPause );
-            fseek(PlotFile, DataOffset, SEEK_SET);
-            ReverseMode = 0;
-            for(currentPlotY = 0; currentPlotY < PictureHeight; currentPlotY++){
-              NewLine = 0;
-              if(ReverseMode == 0){
-                currentPlotX = 0;
-              }
-              else{
-                currentPlotX = PictureWidth - 1;
-              }
-              while(NewLine == 0){
-                fseek(PlotFile, DataOffset + (currentPlotX * PictureWidth + currentPlotX) * 3 + FillBytes * currentPlotY, SEEK_SET);
-                fread(&PixelBlue, 1, 1, PlotFile);
-                fread(&PixelGreen, 1, 1, PlotFile);
-                fread(&PixelRed, 1, 1, PlotFile);
-                
-                if(ReverseMode == 1){
-                  fseek(PlotFile, DataOffset + (currentPlotX * PictureWidth + currentPlotX - 1) * 3 + FillBytes * currentPlotY, SEEK_SET);
-                }
-                fread(&PixelBlueNext, 1, 1, PlotFile);
-                fread(&PixelGreenNext, 1, 1, PlotFile);
-                fread(&PixelRedNext, 1, 1, PlotFile);
-                
-                if(PixelRed < 200 || PixelGreen < 200 || PixelBlue < 200){
-                  if(currentPlotDown == 0){
-                    softPwmWrite(Z_SERVO, SERVODOWN);
-                    usleep(500000);
-                    softPwmWrite(Z_SERVO, 0);
-                    currentPlotDown = 1;
-                  }                  
-                  if(PixelRedNext > 199 && PixelGreenNext > 199 && PixelBlueNext > 199){
-                    if(currentPlotDown == 1){
-                      softPwmWrite(Z_SERVO, SERVOUP);
-                      usleep(500000);
-                      softPwmWrite(Z_SERVO, 0);
-                      currentPlotDown = 0;
-                    }                  
-                  }
-                }
-                else{
-                  if(currentPlotDown == 1){
-                    softPwmWrite(Z_SERVO, SERVOUP);
-                    usleep(500000);
-                    softPwmWrite(Z_SERVO, 0);
-                    currentPlotDown = 0;
-                  }                  
-                }
-                if(ReverseMode == 0){
-                  currentPlotX++;
-                  if(currentPlotX < PictureWidth){
-                    CalculatePlotter(StepsPerPixelX, 0, stepPause);//X-Y movement swapped!!!
-                  }
-                  else{
-                    NewLine = 1;
-                    ReverseMode = 1;
-                  }
-                }
-                else{
-                  currentPlotX--;
-                  if(currentPlotX > -1){
-                    CalculatePlotter(-StepsPerPixelX, 0, stepPause);//X-Y movement swapped!!!                  
-                  }
-                  else{
-                    NewLine = 1;
-                    ReverseMode = 0;
-                  }                  
-                }
-              }//while(NewLine == 0){
-              if(currentPlotDown == 1){
-                softPwmWrite(Z_SERVO, SERVOUP);
-                usleep(500000);
-                softPwmWrite(Z_SERVO, 0);
-                currentPlotDown = 0;
-              }                  
-              CalculatePlotter( 0, -StepsPerPixelY, stepPause );
-            }//for(currentPlotY = 0; currentPlotY < PictureHeight + JetOffset1 + JetOffset2; currentPlotY++){
-            fclose(PlotFile);
-            if(currentPlotDown == 1){
-              softPwmWrite(Z_SERVO, SERVOUP);
-              usleep(500000);
-              softPwmWrite(Z_SERVO, 0);
-              currentPlotDown = 0;
-            } 
-            if(ReverseMode == 1){                 
-              CalculatePlotter( -StepsPerPixelX * PictureWidth, 0, stepPause );
-            }
-          }//if(plotterMode == 0){
-        }//if(strcmp(FileName, "noFiLE") != 0){
-      }//if(KeyHit == 'p'){
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 66 && keyCode[3] == 0 && keyCode[4] == 0) {
+				CalculatePlotter(0, -moveLength, stepPause);
+			}
+
+			// Pen UP/DOWN
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 53 && keyCode[3] == 126 && keyCode[4] == 0) {
+				PEN_FORCE_UP();
+			}
+
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 54 && keyCode[3] == 126 && keyCode[4] == 0) {
+				PEN_FORCE_DOWN();
+			}
 
 
+			if (keyHit == 'm') {
+				if (moveLength == 1) {
+					moveLength = 10;
+				}
+				else {
+					moveLength = 1;
+				}
+				PrintMenue_01(fileName, scale, xMax - xMin, yMax - yMin, moveLength, plMode);
+			}
+
+			if (keyHit == 'f') {
+				fileStartRow = 0;
+				fileSelected = 0;
+				strcpy(fileNameOld, fileName);
+				strcpy(fileName, PrintMenue_02(fileStartRow, 0));
+				menuLevel = 1;
+			}
+
+			if (keyHit == 'p') { // Plot file
+				Msg(1, 20, 0, "3 seconds until plotting starts !!!!!!!!!!!!!!!!!");
+				sleep(3);
+				if (strcmp(fileName, "noFiLE") != 0) {
+					if (! (plotFile=fopen(fullFileName, "rb"))) {
+						sprintf(textLine, "Can't open file '%s'!\n", fullFileName);
+						strcpy(fileName, "NoFiLE");
+						ErrorText(textLine);
+					}
+				}
+				if (strcmp(fileName, "noFiLE") != 0) {
+					if (plMode == PLOTTER_MODE_PLOT) { // Plot SVG file
+						xNow1 = -1;
+						xNow2 = -1;
+						yNow1 = -1;
+						yNow2 = -1;
+
+						currentPlotX = 0;
+						currentPlotY = 0;
+						coordinatePlot = 0;
+						stopPlot = 0;
+
+						plotStartTime = time(0);
+
+						PrintMenue_03(fullFileName, coordinateCount, 0, 0, 0, plotStartTime);
+
+						PEN_UP();
+
+						while (!(feof(plotFile)) && stopPlot == 0) {
+
+							fread(&a, 1, 1, plotFile);
+							i = 0;
+							textLine[0] = '\0';
+
+							while (a != ' ' && a != '<' && a != '>' && a != '\"' && a != '=' && a != ',' && a != ':') {
+								textLine[i] = a;
+								textLine[++i] = '\0';
+								fread(&a, 1, 1, plotFile);
+							}
+
+							if (a == '<') { // Init
+								if (xNow2 > -1 && yNow2 > -1 && (xNow2 != xNow1 || yNow2 != yNow1)) {
+									stopPlot = CalculatePlotter(xNow2 - currentPlotX, yNow2 - currentPlotY, stepPause);
+									PEN_DOWN();
+
+									currentPlotX = xNow2;
+									currentPlotY = yNow2;
+
+									stopPlot = CalculatePlotter(xNow1 - currentPlotX, yNow1 - currentPlotY, stepPause);
+									currentPlotX = xNow1;
+									currentPlotY = yNow1;
+
+									stopPlot = CalculatePlotter(xNow - currentPlotX, yNow - currentPlotY, stepPause);
+									currentPlotX = xNow;
+									currentPlotY = yNow;
+								}
+								rdState = 0;
+								xNow1 = -1;
+								xNow2 = -1;
+								yNow1 = -1;
+								yNow2 = -1;
+							}
+
+							if (strcmp(textLine, "path") == 0) {
+								PEN_UP();
+								rdState = 1; // path found
+							}
+							if (rdState == 1 && strcmp(textLine, "fill") == 0) {
+								rdState = 2; // fill found
+							}
+							if (rdState == 2 && strcmp(textLine, "none") == 0) {
+								rdState = 3; // none found
+							}
+							if (rdState == 2 && strcmp(textLine, "stroke") == 0) {
+								rdState = 0; // stroke found, fill isn't "none"
+							}
+							if (rdState == 3 && strcmp(textLine, "d") == 0 && a == '=') {
+								rdState = 4; // d= found
+							}
+							if (rdState == 4 && strcmp(textLine, "M") == 0 && a == ' ') {
+								rdState = 5; // M found
+							}
+
+							if (rdState == 6) { // Y value
+								yNow = (strtol(textLine, &pEnd, 10) - yMin) * scale * StepsPermmY / StepsPermmX;
+								rdState = 7;
+							}
+							if (rdState == 5 && a == ',') { // X value
+								xNow = ((xMax - strtol(textLine, &pEnd, 10))) * scale;
+								rdState = 6;
+							}
+							if (rdState == 7) {
+								if (xNow2 > -1 && yNow2 > -1 && (xNow2 != xNow1 || yNow2 != yNow1)) {
+									stopPlot = CalculatePlotter(xNow2 - currentPlotX, yNow2 - currentPlotY, stepPause);
+									PEN_DOWN();
+									currentPlotX = xNow2;
+									currentPlotY = yNow2;
+								}
+								xNow2 = xNow1;
+								yNow2 = yNow1;
+								xNow1 = xNow;
+								yNow1 = yNow;
+								rdState = 5;
+							}
+						} // END: while (!(feof(plotFile)) && stopPlot == 0)
+
+						fclose(plotFile);
+
+						PEN_UP();
+
+						PrintMenue_03(fullFileName, coordinateCount, coordinatePlot, 0, 0, plotStartTime);
+						CalculatePlotter( -currentPlotX, -currentPlotY, stepPause );
+						currentPlotX = currentPlotY = 0;
+
+						while (kbhit()) {
+							getch();
+						}
+						Msg(MessageX, MessageY, 0, "Finished! Press any key to return to main menu.");
+						getch();
+						PrintMenue_01(fileName, scale, xMax - xMin, yMax - yMin, moveLength, plMode);
+					} // if (pl == PLOTTER_MODE_PLOT)
+
+					if (plMode == PLOTTER_MODE_PRINT) { // bitmap
+						if (Bitmap_readHeader(&bmp, plotFile, textLine, sizeof(textLine)) != 0) {
+							l_error("Error reading bitmap header of file '%s' [%s]", fullFileName, textLine);
+							// TODO: Not ignore this error
+						}
+
+						fillBytes = 0;
+						while ((bmp.pictureWidth * 3 + fillBytes) % 4 != 0) {
+							fillBytes++;
+						}
+						CalculatePlotter( 0, stepsPerPixelX * bmp.pictureWidth, stepPause );
+						fseek(plotFile, bmp.dataOffset, SEEK_SET);
+						reverseMode = 0;
+
+						for (currentPlotY = 0; currentPlotY < bmp.pictureHeight; currentPlotY++) {
+							newLine = 0;
+							currentPlotX = (reverseMode) ? (bmp.pictureWidth - 1) : 0;
+
+							while (newLine == 0) {
+								fseek(plotFile, bmp.dataOffset + (currentPlotX * bmp.pictureWidth + currentPlotX) * 3 + fillBytes * currentPlotY, SEEK_SET);
+								fread(&bgr, sizeof(bgr), 1, plotFile);
+
+								if (reverseMode == 1) {
+									fseek(plotFile, bmp.dataOffset + (currentPlotX * bmp.pictureWidth + currentPlotX - 1) * 3 + fillBytes * currentPlotY, SEEK_SET);
+								}
+
+								fread(&bgrNext, sizeof(bgrNext), 1, plotFile);
+
+								if (bgr[2] < 200 || bgr[1] < 200 || bgr[0] < 200) {
+									PEN_DOWN();
+
+									if (bgrNext[2] > 199 && bgrNext[1] > 199 && bgrNext[0] > 199) {
+										PEN_UP();
+									}
+								}
+								else {
+									PEN_UP();
+								}
+
+								if (reverseMode == 0) {
+									currentPlotX++;
+									if (currentPlotX < bmp.pictureWidth) {
+										CalculatePlotter(stepsPerPixelX, 0, stepPause); // X-Y movement swapped!!!
+									}
+									else {
+										newLine = 1;
+										reverseMode = 1;
+									}
+								}
+								else {
+									currentPlotX--;
+									if (currentPlotX > -1) {
+										CalculatePlotter(-stepsPerPixelX, 0, stepPause); // X-Y movement swapped!!!
+									}
+									else {
+										newLine = 1;
+										reverseMode = 0;
+									}
+								}
+							} // while (newLine == 0)
+
+							PEN_UP();
+
+							CalculatePlotter( 0, -StepsPerPixelY, stepPause );
+						} // for (currentPlotY = 0; currentPlotY < bmp.pictureHeight + jetOffset1 + jetOffset2; currentPlotY++)
+
+						fclose(plotFile);
+						PEN_UP();
+
+						if (reverseMode == 1) {
+							CalculatePlotter( -stepsPerPixelX * bmp.pictureWidth, 0, stepPause );
+						}
+					} // if (plMode == PLOTTER_MODE_PRINT)
+				} // if (strcmp(fileName, "noFiLE") != 0)
+			} // if (keyHit == 'p')
+		} // if (menuLevel == 0)
+
+		if (menuLevel == 1) { // Select file
+
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 66 && keyCode[3] == 0 && keyCode[4] == 0) {
+				fileSelected++;
+				strcpy(fileName, PrintMenue_02(fileStartRow, fileSelected));
+			}
+
+			if (keyCode[0] == 27 && keyCode[1] == 91 && keyCode[2] == 65 && keyCode[3] == 0 && keyCode[4] == 0) {
+				if (fileSelected > 0) {
+					fileSelected--;
+					strcpy(fileName, PrintMenue_02(fileStartRow, fileSelected));
+				}
+			}
+
+			if (keyHit == 10) { // Read file and store values
+				menuLevel = 0;
+				clrscr(MessageY + 1, MessageY + 1);
+				strcpy(fullFileName, PicturePath);
+				strcat(fullFileName, "/");
+				strcat(fullFileName, fileName);
+				if (! (plotFile=fopen(fullFileName,"rb"))) {
+					sprintf(textLine, "Can't open file '%s'!\n", fullFileName);
+					ErrorText(textLine);
+					ErrorTextArg("Can't open file '%s' [%s]!\n", fullFileName, geterr());
+					strcpy(fileName, "NoFiLE");
+				}
+				else {
+					if (memcmp(fileName + strlen(fileName)-4, ".svg", 4) == 0) {
+						plMode = PLOTTER_MODE_PLOT;
+					}
+					else {
+						plMode = PLOTTER_MODE_PRINT;
+					}
+					xMin = yMin =  1000000;
+					xMax = yMax = -1000000;
+					coordinateCount = 0;
+
+					if (plMode == PLOTTER_MODE_PLOT) {
+						while (!(feof(plotFile)) && stopPlot == 0) {
+							fread(&a, 1, 1, plotFile);
+							i = 0;
+							textLine[0] = '\0';
+							while (a !=' ' && a != '<' && a != '>' && a != '\"' && a != '=' && a != ',' && a != ':') {
+								textLine[i] = a;
+								textLine[++i] = '\0';
+								fread(&a, 1, 1, plotFile);
+							}
+							if (a == '<') { // Init
+								rdState = 0;
+							}
+							if (strcmp(textLine, "path") == 0) {
+								rdState = 1; // path found
+							}
+							if (rdState == 1 && strcmp(textLine, "fill") == 0) {
+								rdState = 2;//fill found
+							}
+							if (rdState == 2 && strcmp(textLine, "none") == 0) {
+								rdState = 3; // none found
+							}
+							if (rdState == 2 && strcmp(textLine, "stroke") == 0) {
+								rdState = 0; // stroke found, fill isn't "none"
+							}
+							if (rdState == 3 && strcmp(textLine, "d") == 0 && a == '=') {
+								rdState = 4; // d= found
+							}
+							if (rdState == 4 && strcmp(textLine, "M") == 0 && a == ' ') {
+								rdState = 5; // M found
+							}
+							if (rdState == 5 && strcmp(textLine, "C") == 0 && a == ' ') {
+								rdState = 5; // C found
+							}
+
+							if (rdState == 6) { // Y value
+								yNow = strtol(textLine, &pEnd, 10);
+								//printf("String='%s' y=%ld\n", textLine, yNow);
+								if (yNow > yMax) {
+									yMax = yNow;
+								}
+								else {
+									if (yNow < yMin) {
+										yMin = yNow;
+									}
+								}
+								rdState = 7;
+							}
+
+							if (rdState == 5 && a == ',') { // X value
+								xNow = strtol(textLine, &pEnd, 10);
+								if (xNow > xMax) {
+									xMax = xNow;
+								}
+								else {
+									if (xNow < xMin) {
+										xMin = xNow;
+									}
+								}
+								rdState = 6;
+							}
+
+							if (rdState == 7) {
+								//printf("Found coordinates %ld, %ld\n", xNow, yNow);
+								rdState = 5;
+							}
+
+							gotoxy(1, MessageY);
+							printf("rdState=% 3d, xNow=% 10ld, xMin=% 10ld, xMax=% 10ld, yMin=% 10ld, yMax=% 10ld   ",
+								rdState, xNow, xMin, xMax, yMin, yMax);
+
+						} // while (!(feof(plotFile)) && stopPlot == 0)
+
+						fclose(plotFile);
+						if (xMax - xMin > yMax -yMin) {
+							scale = STEP_MAX_X / (double)(xMax - xMin);
+						}
+						else {
+							scale = STEP_MAX_X / (double)(yMax - yMin);
+						}
+
+						//getch();
+					} // if (plMode == PLOTTER_MODE_PLOT)
+
+					if (plMode == PLOTTER_MODE_PRINT) { // bitmap
+						if ((Bitmap_readHeader(&bmp, plotFile, textLine, sizeof(textLine)) != 0) ||
+							(Bitmap_validateHeader(&bmp, textLine, sizeof(textLine)) != 0))
+						{
+							ErrorText(textLine);
+							strcpy(fileName, "NoFiLE");
+						}
+
+						xMin = yMin = 0;
+						xMax = bmp.pictureWidth * stepsPerPixelX;
+						yMax = bmp.pictureHeight * StepsPerPixelY;
+						coordinateCount = bmp.pictureWidth * bmp.pictureHeight;
+						scale = 1.0;
+					}
+				}
+
+				//picWidth = (double)(xMax - xMin) * scale;
+				//picHeight = (double)(yMax - yMin) * scale;
+				PrintMenue_01(fileName, scale, xMax - xMin, yMax - yMin, moveLength, plMode);
+			} // if (keyHit == 10)
+
+		} // if (menuLevel == 1)
 
 
-    }//if(MenueLevel == 0){
+		if (keyHit == 27) {
+			if (menuLevel == 0) {
+				clrscr(MessageY + 1, MessageY + 1);
+				MessageText("Exit program (y/n)?", MessageX, MessageY + 1, 0);
+				while (keyHit != 'y' && keyHit != 'n') {
+					keyHit = getch();
+					if (keyHit == 'y' || keyHit == 'Y') {
+						gpioCleanupAndExit();
+					}
+				}
+			}
 
-    if(MenueLevel == 1){//Select file
+			if (menuLevel == 1) {
+				menuLevel = 0;
+				strcpy(fileName, fileNameOld);
+				PrintMenue_01(fileName, scale, xMax - xMin, yMax - yMin, moveLength, plMode);
+			}
+			clrscr(MessageY + 1, MessageY + 1);
+		}
+	}
 
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 66 && KeyCode[3] == 0 && KeyCode[4] == 0){
-        FileSelected++;
-        strcpy(FileName, PrintMenue_02(FileStartRow, FileSelected));
-      }
-
-      if(KeyCode[0] == 27 && KeyCode[1] == 91 && KeyCode[2] == 65 && KeyCode[3] == 0 && KeyCode[4] == 0){
-        if(FileSelected > 0){
-          FileSelected--;
-          strcpy(FileName, PrintMenue_02(FileStartRow, FileSelected));
-        }
-      }
-
-      if(KeyHit == 10){//Read file and store values
-        MenueLevel = 0;
-        clrscr(MessageY + 1, MessageY + 1);
-        strcpy(FullFileName, PicturePath);
-        strcat(FullFileName, "/");
-        strcat(FullFileName, FileName);
-        if((PlotFile=fopen(FullFileName,"rb"))==NULL){
-          sprintf(TextLine, "Can't open file '%s'!\n", FullFileName);
-          ErrorText(TextLine);
-          strcpy(FileName, "NoFiLE");
-        }
-        else{
-          if(memcmp(FileName + strlen(FileName)-4, ".svg",4) == 0){
-            plotterMode = 1;
-          }
-          else{
-            plotterMode = 0;
-          }
-          xMin=1000000;
-          xMax=-1000000;
-          yMin=1000000;
-          yMax=-1000000;
-          coordinateCount = 0;
-          
-          if(plotterMode == 1){
-            
-            while(!(feof(PlotFile)) && stopPlot == 0){
-              
-              fread(&a, 1, 1, PlotFile);
-              i=0;
-              TextLine[0] = '\0';
-              while(a !=' ' && a != '<' && a != '>' && a != '\"' && a != '=' && a != ',' && a != ':'){
-                TextLine[i] = a;
-                TextLine[i+1] = '\0';
-                i++;
-                fread(&a, 1, 1, PlotFile);
-              }
-              if(a == '<'){//Init
-                ReadState = 0;
-              }
-              if(strcmp(TextLine, "path") == 0){
-                ReadState = 1;//path found
-              }
-              if(ReadState == 1 && strcmp(TextLine, "fill") == 0){
-                ReadState = 2;//fill found
-              }
-              if(ReadState == 2 && strcmp(TextLine, "none") == 0){
-                ReadState = 3;//none found
-              }
-              if(ReadState == 2 && strcmp(TextLine, "stroke") == 0){
-                ReadState = 0;//stroke found, fill isn't "none"
-              }
-              if(ReadState == 3 && strcmp(TextLine, "d") == 0 && a == '='){
-                ReadState = 4;//d= found
-              }
-              if(ReadState == 4 && strcmp(TextLine, "M") == 0 && a == ' '){
-                ReadState = 5;//M found
-              }
-
-              if(ReadState == 5 && strcmp(TextLine, "C") == 0 && a == ' '){
-                ReadState = 5;//C found
-              }
-
-              if(ReadState == 6){//Y value
-                yNow = strtol(TextLine, &pEnd, 10);
-                //printf("String='%s' y=%ld\n", TextLine, yNow);
-                if(yNow > yMax){
-                  yMax = yNow;
-                }
-                if(yNow < yMin){
-                  yMin = yNow;
-                }
-                ReadState = 7;
-              }
-              if(ReadState == 5 && a == ','){//X value
-                xNow = strtol(TextLine, &pEnd, 10);
-                if(xNow > xMax){
-                  xMax = xNow;
-                }
-                if(xNow < xMin){
-                  xMin = xNow;
-                }
-                ReadState = 6;
-              }
-              if(ReadState == 7){              
-                //printf("Found koordinates %ld, %ld\n", xNow, yNow);
-                ReadState = 5;
-              }
-              gotoxy(1, MessageY);printf("ReadState=% 3d, xNow=% 10ld, xMin=% 10ld, xMax=% 10ld, yMin=% 10ld, yMax=% 10ld   ", ReadState, xNow, xMin, xMax, yMin, yMax);
-
-            }//while(!(feof(PlotFile)) && stopPlot == 0){
-            fclose(PlotFile);
-            if(xMax - xMin > yMax -yMin){
-              Scale = STEP_MAX_X / (double)(xMax - xMin);
-            }
-            else{
-              Scale = STEP_MAX_X / (double)(yMax - yMin);
-            }
-            //getch();
-          }//if(plotterMode == 1){
-
-
-
-          if(plotterMode == 0){//bitmap
-            fread(&FileInfo, 2, 1, PlotFile);
-            fread(&FileSize, 4, 1, PlotFile);
-            fread(&LongTemp, 4, 1, PlotFile);
-            fread(&DataOffset, 4, 1, PlotFile);
-            fread(&HeaderSize, 4, 1, PlotFile);
-            fread(&PictureWidth, 4, 1, PlotFile);
-            fread(&PictureHeight, 4, 1, PlotFile);
-            fread(&IntTemp, 2, 1, PlotFile);
-            fread(&ColorDepth, 2, 1, PlotFile);
-            fread(&CompressionType, 4, 1, PlotFile);
-            fread(&PictureSize, 4, 1, PlotFile);
-            fread(&XPixelPerMeter, 4, 1, PlotFile);
-            fread(&YPixelPerMeter, 4, 1, PlotFile);
-            fread(&ColorNumber, 4, 1, PlotFile);
-            fread(&ColorUsed, 4, 1, PlotFile);
-            if(FileInfo[0] != 'B' || FileInfo[1] != 'M'){
-              sprintf(TextLine, "Wrong Fileinfo: %s (BM)!\n", FileInfo);
-              ErrorText(TextLine);
-              strcpy(FileName, "NoFiLE");
-            }
-            if(PictureWidth != 55 || PictureHeight != 55){
-              sprintf(TextLine, "Wrong file size (must be 55 x 55): %ld x %ld!\n", PictureWidth, PictureHeight);
-              ErrorText(TextLine);
-              strcpy(FileName, "NoFiLE");
-            }
-            if(ColorDepth != 24){
-              sprintf(TextLine, "Wrong ColorDepth: %d (must be 24)!\n", ColorDepth);
-              ErrorText(TextLine);
-              strcpy(FileName, "NoFiLE");
-            }
-            if(CompressionType != 0){
-              sprintf(TextLine, "Wrong CompressionType: %ld (0)!\n", CompressionType);
-              ErrorText(TextLine);
-              strcpy(FileName, "NoFiLE");
-            }
-            xMin=0;
-            xMax=PictureWidth * StepsPerPixelX;
-            yMin=0;
-            yMax=PictureHeight * StepsPerPixelY;
-            coordinateCount = PictureWidth * PictureHeight;
-            Scale = 1.0;
-          }
-        }
-        //PicWidth = (double)(xMax - xMin) * Scale;
-        //PicHeight = (double)(yMax - yMin) * Scale;
-        PrintMenue_01(FileName, Scale, xMax - xMin, yMax - yMin, MoveLength, plotterMode);
-      }//if(KeyHit == 10){
-    
-    }//if(MenueLevel == 1){
-    
-        
-    if(KeyHit == 27){
-      if(MenueLevel == 0){
-        clrscr(MessageY + 1, MessageY + 1);
-        MessageText("Exit program (y/n)?", MessageX, MessageY + 1, 0);
-        while(KeyHit != 'y' && KeyHit != 'n'){
-          KeyHit = getch();
-          if(KeyHit == 'y'){
-            digitalWrite(X_STEPPER01, 0);
-            digitalWrite(X_STEPPER02, 0);
-            digitalWrite(X_STEPPER03, 0);
-            digitalWrite(X_STEPPER04, 0);
-            digitalWrite(X_ENABLE01, 0);
-            digitalWrite(X_ENABLE02, 0);
-
-            digitalWrite(Y_STEPPER01, 0);
-            digitalWrite(Y_STEPPER02, 0);
-            digitalWrite(Y_STEPPER03, 0);
-            digitalWrite(Y_STEPPER04, 0);
-            exit(0);
-          }
-        }
-      }
-      if(MenueLevel == 1){
-        MenueLevel = 0;
-        strcpy(FileName, FileNameOld);
-        PrintMenue_01(FileName, Scale, xMax - xMin, yMax - yMin, MoveLength, plotterMode);
-      }
-      clrscr(MessageY + 1, MessageY + 1);
-    }
-  }
-
-  return 0;
+	return 0;
 }
