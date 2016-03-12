@@ -6,6 +6,7 @@
 struct Controller {
 	int     stepX;
 	int     stepY;
+	int     stepZ;
 	b8      currentPlotDown;
 	uint8_t moveLength;
 };
@@ -32,5 +33,7 @@ b8 Controller_calcPlotter(
 	int32_t     moveX,
 	int32_t     moveY
 );
+
+void Controller_makeStepZ(Controller* this, int direction);
 
 #endif

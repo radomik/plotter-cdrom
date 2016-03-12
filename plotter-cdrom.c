@@ -150,6 +150,14 @@ int main(int argc, char **argv) {
 				}
 			}
 
+			if (keyHit == ',' || keyHit == '<') {
+				Controller_makeStepZ(&ctr, -ctr.moveLength);
+			}
+
+			if (keyHit == '.' || keyHit == '>') {
+				Controller_makeStepZ(&ctr, ctr.moveLength);
+			}
+
 			if (keyHit == 'm') {
 				Controller_toggleMoveLength(&ctr);
 				Ui_printMenu01(&ui, fileName, vars.scale, vars.xMax - vars.xMin, vars.yMax - vars.yMin, ctr.moveLength, plMode);

@@ -30,28 +30,28 @@ static void Controller_makeStepX(Controller* this, int direction) {
 
 	switch (this->stepX) {
 		case 0:
-			Gpio_digitalWrite(GPIO_X_STEPPER01, 1);
-			Gpio_digitalWrite(GPIO_X_STEPPER02, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER03, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER04, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER01, 1);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER04, 0);
 			break;
 		case 1:
-			Gpio_digitalWrite(GPIO_X_STEPPER01, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER02, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER03, 1);
-			Gpio_digitalWrite(GPIO_X_STEPPER04, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER03, 1);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER04, 0);
 			break;
 		case 2:
-			Gpio_digitalWrite(GPIO_X_STEPPER01, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER02, 1);
-			Gpio_digitalWrite(GPIO_X_STEPPER03, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER04, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER02, 1);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER04, 0);
 			break;
 		case 3:
-			Gpio_digitalWrite(GPIO_X_STEPPER01, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER02, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER03, 0);
-			Gpio_digitalWrite(GPIO_X_STEPPER04, 1);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_X_STEPPER04, 1);
 			break;
 	}
 
@@ -86,28 +86,84 @@ static void Controller_makeStepY(Controller* this, int direction) {
 
 	switch (this->stepY) {
 		case 0:
-			Gpio_digitalWrite(GPIO_Y_STEPPER01, 1);
-			Gpio_digitalWrite(GPIO_Y_STEPPER02, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER03, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER04, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER01, 1);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER04, 0);
 			break;
 		case 1:
-			Gpio_digitalWrite(GPIO_Y_STEPPER01, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER02, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER03, 1);
-			Gpio_digitalWrite(GPIO_Y_STEPPER04, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER03, 1);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER04, 0);
 			break;
 		case 2:
-			Gpio_digitalWrite(GPIO_Y_STEPPER01, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER02, 1);
-			Gpio_digitalWrite(GPIO_Y_STEPPER03, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER04, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER02, 1);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER04, 0);
 			break;
 		case 3:
-			Gpio_digitalWrite(GPIO_Y_STEPPER01, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER02, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER03, 0);
-			Gpio_digitalWrite(GPIO_Y_STEPPER04, 1);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_Y_STEPPER04, 1);
+			break;
+	}
+
+	usleep(STEP_PAUSE);
+}
+
+void Controller_makeStepZ(Controller* this, int direction) {
+	this->stepZ += direction;
+
+	if (this->stepZ > 3) {
+		this->stepZ = 0;
+	}
+	else {
+		if (this->stepZ < 0) {
+			this->stepZ = 3;
+		}
+	}
+
+	// You might have to swap the sequence of steps!!!
+	// If your motor doesn't rotate as expected, try:
+	//  .stepZ == 0   .stepZ == 1   .stepZ == 2   .stepZ == 3
+	//  1 0 0 0      0 0 0 1      0 1 0 0      0 0 1 0
+	// or:
+	//  .stepZ == 0   .stepZ == 1   .stepZ == 2   .stepZ == 3
+	//  1 0 0 0      0 0 1 0      0 1 0 0      0 0 0 1
+	// or:
+	//  .stepZ == 0   .stepZ == 1   .stepZ == 2   .stepZ == 3
+	//  1 0 0 0      0 1 0 0      0 0 1 0      0 0 0 1
+	// or:
+	//  .stepZ == 0   .stepZ == 1   .stepZ == 2   .stepZ == 3
+	//  1 0 0 0      0 1 0 0      0 0 0 1      0 0 1 0
+
+	switch (this->stepZ) {
+		case 0:
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER01, 1);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER04, 0);
+			break;
+		case 1:
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER03, 1);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER04, 0);
+			break;
+		case 2:
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER02, 1);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER04, 0);
+			break;
+		case 3:
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER01, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER02, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER03, 0);
+			Gpio_digitalWrite(GPIO_PIN_Z_STEPPER04, 1);
 			break;
 	}
 
@@ -117,6 +173,7 @@ static void Controller_makeStepY(Controller* this, int direction) {
 void Controller_new(Controller* this) {
 	this->stepX = 0;
 	this->stepY = 0;
+	this->stepZ = 0;
 	this->currentPlotDown = false;
 	this->moveLength = 1;
 }
@@ -140,9 +197,9 @@ void Controller_cleanUpAndExit() {
 }
 
 void Controller_forceMovePen(Controller* this, b8 down) {
-	Gpio_softPwmWrite(GPIO_Z_SERVO, down ? GPIO_SERVODOWN : GPIO_SERVOUP);
+	Gpio_softPwmWrite(GPIO_PIN_Z_SERVO, down ? GPIO_SERVODOWN : GPIO_SERVOUP);
 	usleep(SERVO_PAUSE);
-	Gpio_softPwmWrite(GPIO_Z_SERVO, 0);
+	Gpio_softPwmWrite(GPIO_PIN_Z_SERVO, 0);
 	this->currentPlotDown = down;
 }
 
